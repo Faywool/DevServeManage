@@ -1,0 +1,41 @@
+#include <windows.h>
+
+#define IDI_APP 101
+#define IDI_TRAY_IDLE 102
+#define IDI_TRAY_RUNNING 103
+#define IDI_TRAY_BUSY 104
+#define IDI_TRAY_ERROR 105
+
+IDI_APP ICON "res/app.ico"
+IDI_TRAY_IDLE ICON "res/tray-idle.ico"
+IDI_TRAY_RUNNING ICON "res/tray-running.ico"
+IDI_TRAY_BUSY ICON "res/tray-busy.ico"
+IDI_TRAY_ERROR ICON "res/tray-error.ico"
+
+1 RT_MANIFEST "app.manifest"
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEOS 0x40004L
+FILETYPE 0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "DevServeManage"
+            VALUE "FileDescription", "DevServeManage Native"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "DevServeManage"
+            VALUE "OriginalFilename", "DevServeManage.exe"
+            VALUE "ProductName", "DevServeManage"
+            VALUE "ProductVersion", "1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
+

@@ -1,0 +1,27 @@
+# Build outputs
+native/build/
+native/dist/
+dist/
+artifacts/
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.o
+*.res
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Logs / local runtime data
+*.log
+TestResults/
+coverage*
+
+# OS
+.DS_Store
+Thumbs.db
