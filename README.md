@@ -215,9 +215,3 @@ DevServeManage/
 2. 不提交 `native/build/`、`native/dist/`、`dist/`、日志或本地配置；
 3. 保留 Lucide 的版权与许可声明；
 4. UI 变更附截图或简短说明。
-
-## 仓库状态
-
-代码已整理为仅 C++ / Win32 版本。
-
-远程仓库已配置为 `origin`；本次没有执行 commit 或 push，推送前请先检查 `git status` 并补充自己的仓库说明/发布信息。
