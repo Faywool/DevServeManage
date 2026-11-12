@@ -39,7 +39,7 @@ static void PaintAbout(AboutState& s) {
     p.Text(L"本地项目统一运行台", MakeR(130, 64, 300, 20), 11.5f, 400, g->colors.faint);
     R version = MakeR(128, 88, 72, 22);
     p.FillRound(version, 6, g->colors.chip);
-    p.Text(L"v1.0.0", version, 10.5f, 600, g->colors.accent, 1);
+    p.Text(L"v1.1.0", version, 10.5f, 600, g->colors.accent, 1);
 
     s.closeRect = MakeR(W - 48, 18, 30, 30);
     bool closeHot = s.closeRect.has(s.mouseX, s.mouseY);
@@ -91,8 +91,8 @@ static void PaintAbout(AboutState& s) {
     p.Text(L"发送邮件", s.mailRect, 10.5f, 500, mailHot ? g->colors.text : g->colors.sub, 1);
 
     p.Line(28, 454, W - 28, 454, g->colors.border, 1);
-    p.Text(L"配置目录", MakeR(32, 470, 100, 20), 10.0f, 500, g->colors.faint);
-    p.Text(L"%APPDATA%\\DevServeManage", MakeR(110, 470, 300, 20), 10.5f, 400, g->colors.text);
+    p.Text(L"配置文件", MakeR(32, 470, 100, 20), 10.0f, 500, g->colors.faint);
+    p.Text(L"程序目录\\" + FileNameOf(ConfigPath()), MakeR(110, 470, 300, 20), 10.5f, 400, g->colors.text);
     s.configRect = MakeR(W - 184, 466, 152, 30);
     bool configHot = s.configRect.has(s.mouseX, s.mouseY);
     p.FillRound(s.configRect, 7, configHot ? g->colors.chipHover : g->colors.chip);

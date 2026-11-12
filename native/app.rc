@@ -15,8 +15,8 @@ IDI_TRAY_ERROR ICON "res/tray-error.ico"
 1 RT_MANIFEST "app.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 1,1,0,0
+PRODUCTVERSION 1,1,0,0
 FILEOS 0x40004L
 FILETYPE 0x1L
 BEGIN
@@ -26,11 +26,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "DevServeManage"
             VALUE "FileDescription", "DevServeManage Native"
-            VALUE "FileVersion", "1.0.0.0"
+            VALUE "FileVersion", "1.1.0.0"
             VALUE "InternalName", "DevServeManage"
             VALUE "OriginalFilename", "DevServeManage.exe"
             VALUE "ProductName", "DevServeManage"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "ProductVersion", "1.1.0"
         END
     END
     BLOCK "VarFileInfo"

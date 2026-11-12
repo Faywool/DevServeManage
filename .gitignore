@@ -22,6 +22,9 @@ artifacts/
 TestResults/
 coverage*
 
+# Portable local config beside the executable
+/DevServeManage.json
+
 # OS
 .DS_Store
 Thumbs.db

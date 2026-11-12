@@ -1,4 +1,4 @@
-// Minimal JSON reader/writer used only for package.json, launchSettings.json and workspace.json.
+// Minimal JSON reader/writer used for project detection and the single program config file.
 #pragma once
 #include <string>
 #include <vector>

@@ -127,10 +127,10 @@ static void PaintSettings(SettingsDialogState& state) {
     DrawSettingsButton(p, state, MakeR(28, 442, 120, 32), L"恢复默认设置", SReset);
     DrawSettingsButton(p, state, MakeR(156, 442, 116, 32), L"导出配置…", SExport);
     DrawSettingsButton(p, state, MakeR(280, 442, 116, 32), L"导入配置…", SImport);
-    p.Text(L"导出内容包含设置和项目工作区 JSON", MakeR(410, 448, 280, 20), 9.8f, 400, g->colors.faint);
+    p.Text(L"导出为单文件配置（设置 + 项目）", MakeR(410, 448, 280, 20), 9.8f, 400, g->colors.faint);
 
     p.Line(24, 492, W - 24, 492, g->colors.border, 1);
-    p.Text(L"DevServeManage Native · 1.0.0", MakeR(28, 508, 260, 22), 10.0f, 400, g->colors.faint);
+    p.Text(L"DevServeManage Native · 1.1.0", MakeR(28, 508, 260, 22), 10.0f, 400, g->colors.faint);
     R cancel = MakeR(W - 204, 502, 84, 30);
     R save = MakeR(W - 112, 502, 84, 30);
     DrawSettingsButton(p, state, cancel, L"取消", SCancel);
@@ -144,9 +144,13 @@ static void SettingsClose(SettingsDialogState& state, bool save) {
     state.closing = true;
     if (save) {
         g_settings = state.draft;
-        SaveSettings();
-        if (state.hasImportedWorkspace)
-            WriteTextFile(JoinPath(DataDirectory(), L"workspace.json"), state.importedWorkspace);
+        std::wstring error;
+        bool ok = SaveSettings(state.hasImportedWorkspace ? &state.importedWorkspace : nullptr, &error);
+        if (!ok) {
+            state.closing = false;
+            ShowInfoDialog(state.hwnd, L"保存失败", error + L"\n\n配置文件：" + ConfigPath());
+            return;
+        }
         RefreshTheme();
         state.saved = true;
     } else {
@@ -185,26 +189,6 @@ static bool PickJsonFile(HWND owner, bool save, std::wstring& outPath) {
     return false;
 }
 
-static std::string EscapeJsonString(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 32);
-    for (unsigned char c : s) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (c < 0x20) {
-                char buf[8]{}; snprintf(buf, sizeof(buf), "\\u%04x", c); out += buf;
-            } else out.push_back((char)c);
-            break;
-        }
-    }
-    return out;
-}
-
 static AppSettings SettingsFromJson(const dsm::Json& json, const AppSettings& fallback) {
     AppSettings s = fallback;
     if (json.type != dsm::Json::Type::Object) return s;
@@ -220,11 +204,14 @@ static AppSettings SettingsFromJson(const dsm::Json& json, const AppSettings& fa
 static void ExportSettingsConfig(HWND owner, const AppSettings& settings) {
     std::wstring path;
     if (!PickJsonFile(owner, true, path)) return;
-    std::string workspace = ReadTextFile(JoinPath(DataDirectory(), L"workspace.json"));
-    std::string settingsJson = SettingsJson(settings);
-    std::string bundle = "{\n  \"app\": \"DevServeManage\",\n  \"format\": 1,\n  \"settings\": " +
-        settingsJson + ",\n  \"workspaceJson\": \"" + EscapeJsonString(workspace) + "\"\n}\n";
-    if (!WriteTextFile(path, bundle)) {
+    dsm::Json root = LoadConfigRoot();
+    dsm::Json out;
+    out.type = dsm::Json::Type::Object;
+    dsm::Json version; version.type = dsm::Json::Type::Number; version.number = 1;
+    out.object.emplace_back("version", std::move(version));
+    out.object.emplace_back("settings", SettingsNode(settings));
+    out.object.emplace_back("workspace", WorkspaceNodeFromConfig(root));
+    if (!WriteTextFile(path, out.dump(2))) {
         ShowInfoDialog(owner, L"导出失败", L"无法写入配置文件。");
         return;
     }
@@ -246,19 +233,17 @@ static void ImportSettingsConfig(SettingsDialogState& state) {
         ShowInfoDialog(state.hwnd, L"导入失败", L"配置中缺少 settings 字段。");
         return;
     }
-    state.draft = SettingsFromJson(*settingsNode, state.draft);
-    const dsm::Json* ws = root.find("workspaceJson");
-    if (ws && ws->type == dsm::Json::Type::String && !ws->text.empty()) {
-        dsm::Json check = dsm::Json::Parse(ws->text);
-        if (check.type != dsm::Json::Type::Object) {
-            ShowInfoDialog(state.hwnd, L"导入失败", L"workspaceJson 不是有效的工作区 JSON。");
-            return;
-        }
-        state.hasImportedWorkspace = true;
-        state.importedWorkspace = ws->text;
+    const dsm::Json* workspace = root.obj("workspace");
+    if (!workspace) {
+        ShowInfoDialog(state.hwnd, L"导入失败", L"配置中缺少 workspace 字段。");
+        return;
     }
+
+    state.draft = SettingsFromJson(*settingsNode, state.draft);
+    state.hasImportedWorkspace = true;
+    state.importedWorkspace = workspace->dump(2);
     SettingsApplyDraft(state);
-    ShowInfoDialog(state.hwnd, L"导入成功", L"设置已载入；点击「保存」后写入项目工作区。");
+    ShowInfoDialog(state.hwnd, L"导入成功", L"设置已载入；点击「保存」后写入配置文件。");
 }
 
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

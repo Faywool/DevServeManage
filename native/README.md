@@ -24,7 +24,7 @@ Contact: [Faywool@Live.cn](mailto:Faywool@Live.cn)
 native/
 ├─ src/
 │  ├─ main.cpp        主窗口、Direct2D 列表、列表行按钮、项目管理 UI
-│  ├─ core.h/.cpp     项目模型、workspace JSON、进程/端口/服务、项目识别
+│  ├─ core.h/.cpp     项目模型、单文件配置、进程/端口/服务、项目识别
 │  ├─ json.h          轻量 JSON 解析器
 │  ├─ tail.inc        托盘、快速查看浮层、入口
 │  ├─ dialogs.inc     应用内消息框、项目编辑窗口
@@ -68,6 +68,13 @@ native\dist\DevServeManage.exe
 
 `native/build/` 和 `native/dist/` 是构建产物，不进入 Git。
 
+.NET 项目的输出目录会按当前 Release/Debug 配置解析：
+
+- 优先读取 `Properties\PublishProfiles\*.pubxml` 中的 `PublishDir` / `PublishUrl`（仅文件系统发布；Web Deploy、FTP 等远程发布会被忽略）；
+- 再读取 `.csproj` 对应配置的 `OutputPath`、`BaseOutputPath`、`PublishDir`；
+- 优先返回已存在的 `publish` 目录或目标框架子目录，不会因为 `bin\<Configuration>` 不存在就返回项目根目录；
+- Release 发布时若所选 profile 设置了 `DeleteExistingFiles=true`，会先清空该 profile 的文件系统目标目录，再执行完整的 `dotnet publish`。`dotnet publish` 本身不处理这个 Visual Studio 选项，不清理会留下旧文件，导致文件数量和 VS 不一致。
+
 ## 运行
 
 ```powershell
@@ -78,14 +85,21 @@ native\dist\DevServeManage.exe
 - 关闭主窗口只是隐藏，进程继续在托盘运行。
 - 退出请使用托盘右键菜单 →「退出 DevServeManage」。
 
-## 数据目录
+## 配置文件
+
+配置位于 exe 同目录，首次启动自动生成：
 
 ```text
-%APPDATA%\DevServeManage\
-├─ workspace.json     项目列表与每个项目的启动/构建配置
-├─ settings.json      主题、Primary 颜色、行为和配置开关
-├─ logs\              每个项目的运行日志
-└─ native.log         应用诊断日志
+<exe 所在目录>\DevServeManage.json
+```
+
+同一个文件保存设置和项目工作区，配置不会写入 `%APPDATA%`、注册表及其他目录。默认配置没有项目、网站或路径。
+
+```text
+<exe 所在目录>\
+├─ DevServeManage.json   设置 + 项目工作区（唯一的配置文件）
+├─ logs\                 每个项目的运行日志
+└─ native.log            应用诊断日志
 ```
 
 项目日志会在手动停止项目时清空；应用日志用于排查托盘/进程问题。
@@ -105,12 +119,16 @@ native\dist\DevServeManage.exe
 
 ![设置](docs/settings.png)
 
-配置导出内容：
+配置导出内容与主配置文件结构相同：
 
 ```json
 {
+  "version": 1,
   "settings": { "...": "..." },
-  "workspaceJson": "..."
+  "workspace": {
+    "version": 1,
+    "projects": []
+  }
 }
 ```
 
@@ -146,7 +164,7 @@ DevServeManage 对这类项目的处理：
 
 - 从 `*Service.Designer.cs` 或 `ProjectInstaller.Designer.cs` 识别 SCM 服务名；
 - 服务未安装时，卡片主按钮显示「安装服务」；
-- 点击后弹确认，以管理员权限（UAC）运行 `InstallUtil.exe <bin\Debug\服务.exe>`；
+- 点击后弹确认，以管理员权限（UAC）运行 `InstallUtil.exe <实际输出目录>\服务.exe`（优先 Release，再 Debug；会读取项目的 `OutputPath` 和 `Properties\PublishProfiles` 发布配置）；
 - 安装后用 `sc config ... DisplayName=` 把 Windows 服务列表里的显示名称设置为项目名称；
 - 安装成功后自动调用 SCM 启动服务；
 - 之后卡片按钮直接通过 SCM 启动 / 停止，不再需要手动打开服务管理器。

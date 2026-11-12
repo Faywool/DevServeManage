@@ -140,7 +140,7 @@ static void EnsureMessageClass() {
 }
 
 static bool ShowMessageDialogImpl(HWND owner, const std::wstring& title, const std::wstring& message,
-    const std::wstring& primary, const std::wstring& secondary, bool danger) {
+    const std::wstring& primary, const std::wstring& secondary, bool danger, bool topmost) {
     if (!g || !g->main) return false;
     EnsureMessageClass();
     MessageDialogState state;
@@ -155,7 +155,7 @@ static bool ShowMessageDialogImpl(HWND owner, const std::wstring& title, const s
     int w = 560, h = 270;
     if (message.size() > 90) h = 310;
     if (message.size() > 180) h = 350;
-    state.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kMessageClass, L"", WS_POPUP,
+    state.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | (topmost ? WS_EX_TOPMOST : 0), kMessageClass, L"", WS_POPUP,
         0, 0, w, h, owner, nullptr, g->instance, nullptr);
     if (!state.hwnd) { g_msgDialog = nullptr; return false; }
     state.painter.hwnd = state.hwnd;
@@ -164,9 +164,15 @@ static bool ShowMessageDialogImpl(HWND owner, const std::wstring& title, const s
     int corner = 2;
     DwmSetWindowAttribute(state.hwnd, 33, &corner, sizeof(corner));
     CenterWindowOnOwner(state.hwnd, owner, w, h);
+    if (topmost)
+        SetWindowPos(state.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     EnableWindow(owner, FALSE);
     ShowWindow(state.hwnd, SW_SHOW);
+    if (topmost)
+        SetWindowPos(state.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(state.hwnd);
     UpdateWindow(state.hwnd);
 
@@ -182,12 +188,12 @@ static bool ShowMessageDialogImpl(HWND owner, const std::wstring& title, const s
 }
 
 static void ShowInfoDialog(HWND owner, const std::wstring& title, const std::wstring& message) {
-    ShowMessageDialogImpl(owner, title, message, L"确定", L"", false);
+    ShowMessageDialogImpl(owner, title, message, L"确定", L"", false, false);
 }
 
 static bool ShowConfirmDialog(HWND owner, const std::wstring& title, const std::wstring& message,
-    const std::wstring& primary, const std::wstring& secondary, bool danger) {
-    return ShowMessageDialogImpl(owner, title, message, primary, secondary, danger);
+    const std::wstring& primary, const std::wstring& secondary, bool danger, bool topmost) {
+    return ShowMessageDialogImpl(owner, title, message, primary, secondary, danger, topmost);
 }
 
 // ---------------------------------------------------------------------------

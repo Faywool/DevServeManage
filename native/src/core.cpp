@@ -9,7 +9,6 @@
 #include <iphlpapi.h>
 #include <tlhelp32.h>
 #include <shellapi.h>
-#include <shlobj.h>
 #include <shlwapi.h>
 #include <sddl.h>
 #include <psapi.h>
@@ -79,22 +78,39 @@ std::wstring Format(const wchar_t* fmt, ...) {
     return out;
 }
 
+std::wstring ExecutablePath() {
+    std::wstring path(32768, L'\0');
+    DWORD n = GetModuleFileNameW(nullptr, path.data(), (DWORD)path.size());
+    path.resize(n);
+    return path;
+}
+
 std::wstring DataDirectory() {
-    PWSTR p = nullptr;
-    std::wstring out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p))) {
-        out = p;
-        CoTaskMemFree(p);
+    std::wstring dir = DirectoryOf(ExecutablePath());
+    return dir.empty() ? L"." : dir;
+}
+
+std::wstring ConfigPath() {
+    std::wstring name = FileNameOf(ExecutablePath());
+    size_t dot = name.find_last_of(L'.');
+    if (dot != std::wstring::npos && dot > 0) name.resize(dot);
+    if (name.empty()) name = L"DevServeManage";
+    return JoinPath(DataDirectory(), name + L".json");
+}
+
+bool SaveConfigDocument(const std::string& text, std::wstring* error) {
+    std::wstring path = ConfigPath();
+    std::wstring temp = path + L".tmp";
+    if (!WriteTextFile(temp, text)) {
+        if (error) *error = L"无法写入 " + path;
+        return false;
     }
-    if (out.empty()) {
-        wchar_t buf[MAX_PATH]{};
-        DWORD n = GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
-        out.assign(buf, n);
+    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        if (error) *error = Format(L"无法替换 %s（错误 %lu）", path.c_str(), GetLastError());
+        DeleteFileW(temp.c_str());
+        return false;
     }
-    out = JoinPath(out, L"DevServeManage");
-    std::error_code ec;
-    fs::create_directories(fs::path(out), ec);
-    return out;
+    return true;
 }
 
 std::wstring AppLogPath() { return JoinPath(DataDirectory(), L"native.log"); }
@@ -408,6 +424,475 @@ static std::wstring FindCsproj(const std::wstring& root) {
     return {};
 }
 
+// ---------------------------------------------------------------------------
+// Output directory resolution
+// ---------------------------------------------------------------------------
+struct MsBuildOutputInfo {
+    bool sdk = false;
+    std::wstring targetFramework;
+    std::wstring targetFrameworks;
+    std::wstring outputPath;
+    std::wstring baseOutputPath;
+    std::wstring publishDir;
+    std::wstring appendTargetFramework;
+    std::wstring runtimeIdentifier;
+};
+
+struct MsBuildSlot {
+    std::wstring value;
+    int priority = -1;
+};
+
+static void SetMsBuildSlot(MsBuildSlot& slot, const std::wstring& value, int priority) {
+    if (!value.empty() && priority >= slot.priority) {
+        slot.value = value;
+        slot.priority = priority;
+    }
+}
+
+static std::wstring DecodeXmlText(std::wstring value) {
+    struct Entity { const wchar_t* from; const wchar_t* to; };
+    static const Entity entities[] = {
+        { L"&lt;", L"<" }, { L"&gt;", L">" }, { L"&quot;", L"\"" },
+        { L"&apos;", L"'" }, { L"&amp;", L"&" },
+    };
+    for (const auto& entity : entities) {
+        std::wstring from = entity.from;
+        std::wstring to = entity.to;
+        size_t pos = 0;
+        while ((pos = value.find(from, pos)) != std::wstring::npos) {
+            value.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    }
+    return value;
+}
+
+static std::wstring XmlAttribute(const std::wstring& tag, const wchar_t* name) {
+    std::wstring lowerTag = ToLower(tag);
+    std::wstring key = ToLower(std::wstring(name));
+    size_t pos = 0;
+    while ((pos = lowerTag.find(key, pos)) != std::wstring::npos) {
+        bool left = pos == 0 || iswspace(tag[pos - 1]) || tag[pos - 1] == L'<';
+        size_t after = pos + key.size();
+        bool right = after >= tag.size() || iswspace(tag[after]) || tag[after] == L'=' || tag[after] == L'/';
+        if (left && right) {
+            size_t eq = tag.find(L'=', after);
+            if (eq != std::wstring::npos) {
+                size_t value = eq + 1;
+                while (value < tag.size() && iswspace(tag[value])) ++value;
+                if (value < tag.size() && (tag[value] == L'"' || tag[value] == L'\'')) {
+                    wchar_t quote = tag[value++];
+                    size_t end = tag.find(quote, value);
+                    if (end != std::wstring::npos) return DecodeXmlText(tag.substr(value, end - value));
+                } else {
+                    size_t end = value;
+                    while (end < tag.size() && !iswspace(tag[end]) && tag[end] != L'>' && tag[end] != L'/') ++end;
+                    return DecodeXmlText(tag.substr(value, end - value));
+                }
+            }
+        }
+        pos = after;
+    }
+    return {};
+}
+
+static std::wstring XmlElementValue(const std::wstring& body, const wchar_t* name) {
+    std::wstring lowerBody = ToLower(body);
+    std::wstring lowerName = ToLower(std::wstring(name));
+    std::wstring open = L"<" + lowerName;
+    size_t pos = 0;
+    while ((pos = lowerBody.find(open, pos)) != std::wstring::npos) {
+        size_t after = pos + open.size();
+        if (after >= body.size()) break;
+        wchar_t next = body[after];
+        if (!(iswspace(next) || next == L'>' || next == L'/')) {
+            pos = after;
+            continue;
+        }
+        size_t openEnd = body.find(L'>', after);
+        if (openEnd == std::wstring::npos) break;
+        size_t beforeClose = openEnd;
+        while (beforeClose > after && iswspace(body[beforeClose - 1])) --beforeClose;
+        if (beforeClose > after && body[beforeClose - 1] == L'/') {
+            pos = openEnd + 1;
+            continue;
+        }
+        std::wstring close = L"</" + lowerName;
+        size_t closePos = lowerBody.find(close, openEnd + 1);
+        if (closePos == std::wstring::npos) break;
+        return DecodeXmlText(Trim(body.substr(openEnd + 1, closePos - openEnd - 1)));
+    }
+    return {};
+}
+
+static int OutputGroupPriority(const std::wstring& condition, bool release) {
+    if (condition.empty()) return 2;
+    std::wstring lower = ToLower(condition);
+    bool hasRelease = lower.find(L"release") != std::wstring::npos;
+    bool hasDebug = lower.find(L"debug") != std::wstring::npos;
+    if (release) {
+        if (hasDebug && !hasRelease) return 0;
+        return hasRelease ? 3 : 1;
+    }
+    if (hasRelease && !hasDebug) return 0;
+    return hasDebug ? 3 : 1;
+}
+
+static MsBuildOutputInfo ReadMsBuildOutputInfo(const std::wstring& xml, bool release) {
+    MsBuildOutputInfo info;
+    std::wstring lower = ToLower(xml);
+    size_t projectPos = lower.find(L"<project");
+    if (projectPos != std::wstring::npos) {
+        size_t projectEnd = xml.find(L'>', projectPos);
+        if (projectEnd != std::wstring::npos) {
+            std::wstring projectTag = xml.substr(projectPos, projectEnd - projectPos);
+            info.sdk = !XmlAttribute(projectTag, L"Sdk").empty();
+        }
+    }
+    if (lower.find(L"microsoft.net.sdk") != std::wstring::npos) info.sdk = true;
+
+    MsBuildSlot targetFramework, targetFrameworks, outputPath, baseOutputPath;
+    MsBuildSlot publishDir, appendTargetFramework, runtimeIdentifier;
+    size_t pos = 0;
+    while ((pos = lower.find(L"<propertygroup", pos)) != std::wstring::npos) {
+        size_t openEnd = xml.find(L'>', pos);
+        if (openEnd == std::wstring::npos) break;
+        size_t close = lower.find(L"</propertygroup", openEnd);
+        if (close == std::wstring::npos) break;
+        std::wstring tag = xml.substr(pos, openEnd - pos);
+        std::wstring body = xml.substr(openEnd + 1, close - openEnd - 1);
+        int priority = OutputGroupPriority(XmlAttribute(tag, L"Condition"), release);
+        pos = close + 1;
+        if (priority <= 0) continue;
+        SetMsBuildSlot(targetFramework, XmlElementValue(body, L"TargetFramework"), priority);
+        SetMsBuildSlot(targetFrameworks, XmlElementValue(body, L"TargetFrameworks"), priority);
+        SetMsBuildSlot(outputPath, XmlElementValue(body, L"OutputPath"), priority);
+        SetMsBuildSlot(baseOutputPath, XmlElementValue(body, L"BaseOutputPath"), priority);
+        SetMsBuildSlot(publishDir, XmlElementValue(body, L"PublishDir"), priority);
+        SetMsBuildSlot(appendTargetFramework, XmlElementValue(body, L"AppendTargetFrameworkToOutputPath"), priority);
+        SetMsBuildSlot(runtimeIdentifier, XmlElementValue(body, L"RuntimeIdentifier"), priority);
+    }
+    info.targetFramework = Trim(targetFramework.value);
+    info.targetFrameworks = Trim(targetFrameworks.value);
+    info.outputPath = Trim(outputPath.value);
+    info.baseOutputPath = Trim(baseOutputPath.value);
+    info.publishDir = Trim(publishDir.value);
+    info.appendTargetFramework = Trim(appendTargetFramework.value);
+    info.runtimeIdentifier = Trim(runtimeIdentifier.value);
+    return info;
+}
+
+static std::wstring FirstTargetFramework(const MsBuildOutputInfo& info) {
+    if (!info.targetFramework.empty()) return info.targetFramework;
+    size_t sep = info.targetFrameworks.find(L';');
+    std::wstring first = sep == std::wstring::npos ? info.targetFrameworks : info.targetFrameworks.substr(0, sep);
+    return Trim(first);
+}
+
+static void ReplaceAllText(std::wstring& text, const std::wstring& from, const std::wstring& to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::wstring::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+static std::wstring ExpandMsBuildValue(std::wstring value, const MsBuildOutputInfo& info,
+    const std::wstring& root, const std::wstring& configuration, const std::wstring& outputDir) {
+    std::wstring projectDir = root;
+    if (!projectDir.empty() && projectDir.back() != L'\\' && projectDir.back() != L'/') projectDir += L'\\';
+    std::wstring outputWithSlash = outputDir;
+    if (!outputWithSlash.empty() && outputWithSlash.back() != L'\\' && outputWithSlash.back() != L'/') outputWithSlash += L'\\';
+    std::wstring firstTargetFramework = FirstTargetFramework(info);
+    for (int pass = 0; pass < 3; ++pass) {
+        ReplaceAllText(value, L"$(Configuration)", configuration);
+        ReplaceAllText(value, L"$(Platform)", L"AnyCPU");
+        ReplaceAllText(value, L"$(TargetFramework)", firstTargetFramework);
+        ReplaceAllText(value, L"$(TargetFrameworks)", info.targetFrameworks);
+        ReplaceAllText(value, L"$(BaseOutputPath)", info.baseOutputPath);
+        ReplaceAllText(value, L"$(RuntimeIdentifier)", info.runtimeIdentifier);
+        ReplaceAllText(value, L"$(MSBuildProjectDirectory)", root);
+        ReplaceAllText(value, L"$(ProjectDir)", projectDir);
+        ReplaceAllText(value, L"$(SolutionDir)", projectDir);
+        if (!outputWithSlash.empty()) ReplaceAllText(value, L"$(OutputPath)", outputWithSlash);
+    }
+    return Trim(value);
+}
+
+static bool IsAbsoluteFsPath(const std::wstring& path) {
+    return (path.size() >= 2 && path[1] == L':') ||
+        (path.size() >= 2 && (path[0] == L'\\' || path[0] == L'/') &&
+            (path[1] == L'\\' || path[1] == L'/'));
+}
+
+static std::wstring NormalizeFsPath(const std::wstring& path) {
+    if (path.empty()) return {};
+    std::wstring text = path;
+    for (auto& c : text) if (c == L'/') c = L'\\';
+    std::error_code ec;
+    fs::path normalized = fs::path(text).lexically_normal();
+    std::wstring result = normalized.wstring();
+    while (result.size() > 3 && (result.back() == L'\\' || result.back() == L'/')) result.pop_back();
+    return result;
+}
+
+static std::wstring ResolveMsBuildPath(const std::wstring& root, const std::wstring& value) {
+    std::wstring text = Trim(value);
+    if (text.empty()) return {};
+    if (IsAbsoluteFsPath(text)) return NormalizeFsPath(text);
+    return NormalizeFsPath(JoinPath(root, text));
+}
+
+static std::wstring AppendFsDir(const std::wstring& base, const std::wstring& child) {
+    if (child.empty()) return NormalizeFsPath(base);
+    if (base.empty()) return NormalizeFsPath(child);
+    return NormalizeFsPath(JoinPath(base, child));
+}
+
+static bool SameLeafName(const std::wstring& path, const std::wstring& name) {
+    return _wcsicmp(FileNameOf(path).c_str(), name.c_str()) == 0;
+}
+
+static std::wstring FindPublishUnder(const std::wstring& root, const std::wstring& targetFramework) {
+    if (root.empty() || !DirectoryExists(root)) return {};
+    if (ToLower(FileNameOf(root)) == L"publish") return NormalizeFsPath(root);
+
+    std::vector<std::wstring> found;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(fs::path(root), fs::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) break;
+        if (it.depth() > 3) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        std::error_code typeError;
+        if (!it->is_directory(typeError)) continue;
+        if (ToLower(it->path().filename().wstring()) == L"publish") {
+            found.push_back(it->path().wstring());
+            it.disable_recursion_pending();
+        }
+    }
+    if (found.empty()) return {};
+    if (!targetFramework.empty()) {
+        for (const auto& path : found) {
+            if (ToLower(path).find(L"\\" + ToLower(targetFramework) + L"\\") != std::wstring::npos)
+                return NormalizeFsPath(path);
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const std::wstring& a, const std::wstring& b) {
+        std::error_code ea, eb;
+        auto ta = fs::last_write_time(fs::path(a), ea);
+        auto tb = fs::last_write_time(fs::path(b), eb);
+        if (ea || eb) return _wcsicmp(a.c_str(), b.c_str()) > 0;
+        return ta > tb;
+    });
+    return NormalizeFsPath(found.front());
+}
+
+// A publish profile is the authoritative description of where "dotnet
+// publish" / Visual Studio publishes a project. Folder profiles use
+// PublishDir or PublishUrl; Web Deploy/FTP/container profiles do not point at
+// a local artifact directory and are ignored.
+struct PublishProfileCandidate {
+    std::wstring path;
+    std::wstring profilePath;
+    bool exists = false;
+    bool deleteExistingFiles = false;
+    int score = 0;
+    bool hasModified = false;
+    fs::file_time_type modified{};
+};
+
+static int PublishConfigRank(const std::wstring& configuration, bool release) {
+    if (configuration.empty()) return 0;
+    std::wstring lower = ToLower(configuration);
+    bool hasRelease = lower.find(L"release") != std::wstring::npos;
+    bool hasDebug = lower.find(L"debug") != std::wstring::npos;
+    if (release) {
+        if (hasDebug && !hasRelease) return -1;
+        return hasRelease ? 2 : 0;
+    }
+    if (hasRelease && !hasDebug) return -1;
+    return hasDebug ? 2 : 0;
+}
+
+static bool ProfileLooksFileSystem(const std::wstring& method, const std::wstring& provider,
+    const std::wstring& protocol) {
+    std::wstring all = ToLower(method + L" " + provider + L" " + protocol);
+    if (all.find(L"filesystem") != std::wstring::npos) return true;
+    for (const wchar_t* remote : { L"msdeploy", L"webdeploy", L"ftp", L"azure", L"package", L"container" }) {
+        if (all.find(remote) != std::wstring::npos) return false;
+    }
+    return true;
+}
+
+static std::vector<PublishProfileCandidate> FindPublishProfiles(const std::wstring& projectDir,
+    const MsBuildOutputInfo& baseInfo, bool release, const std::wstring& outputBase) {
+    std::vector<PublishProfileCandidate> result;
+    std::wstring profilesDir = JoinPath(projectDir, L"Properties\\PublishProfiles");
+    if (!DirectoryExists(profilesDir)) return result;
+
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(fs::path(profilesDir),
+             fs::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) break;
+        if (it.depth() > 2) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        std::error_code typeError;
+        if (it->is_directory(typeError)) {
+            std::wstring leaf = ToLower(it->path().filename().wstring());
+            if (leaf == L"bin" || leaf == L"obj") it.disable_recursion_pending();
+            continue;
+        }
+        if (ToLower(it->path().extension().wstring()) != L".pubxml") continue;
+
+        std::wstring xml = Widen(ReadTextFile(it->path().wstring()));
+        if (xml.empty()) continue;
+
+        std::wstring configuration = XmlElementValue(xml, L"LastUsedBuildConfiguration");
+        if (configuration.empty()) configuration = XmlElementValue(xml, L"Configuration");
+        int configurationRank = PublishConfigRank(configuration, release);
+        if (configurationRank < 0) continue;
+
+        std::wstring publishDir = XmlElementValue(xml, L"PublishDir");
+        std::wstring publishUrl = XmlElementValue(xml, L"PublishUrl");
+        std::wstring value = publishDir.empty() ? publishUrl : publishDir;
+        if (value.empty()) continue;
+
+        std::wstring method = XmlElementValue(xml, L"WebPublishMethod");
+        std::wstring provider = XmlElementValue(xml, L"PublishProvider");
+        std::wstring protocol = XmlElementValue(xml, L"PublishProtocol");
+        if (!ProfileLooksFileSystem(method, provider, protocol)) continue;
+
+        std::wstring lowerValue = ToLower(value);
+        if (lowerValue.rfind(L"http://", 0) == 0 || lowerValue.rfind(L"https://", 0) == 0 ||
+            lowerValue.rfind(L"ftp://", 0) == 0 || lowerValue.rfind(L"ftps://", 0) == 0)
+            continue;
+
+        MsBuildOutputInfo profileInfo = baseInfo;
+        std::wstring profileTfm = XmlElementValue(xml, L"TargetFramework");
+        if (!profileTfm.empty()) {
+            profileInfo.targetFramework = profileTfm;
+            profileInfo.targetFrameworks.clear();
+        }
+
+        std::wstring expanded = ExpandMsBuildValue(value, profileInfo, projectDir,
+            release ? L"Release" : L"Debug", outputBase);
+        if (expanded.empty() || expanded.find(L"$(") != std::wstring::npos) continue;
+
+        if (ToLower(expanded).rfind(L"file://", 0) == 0) {
+            expanded = expanded.substr(7);
+            while (!expanded.empty() && (expanded.front() == L'/' || expanded.front() == L'\\'))
+                expanded.erase(expanded.begin());
+        }
+        std::wstring resolved = ResolveMsBuildPath(projectDir, expanded);
+        if (resolved.empty()) continue;
+
+        PublishProfileCandidate candidate;
+        candidate.path = NormalizeFsPath(resolved);
+        candidate.profilePath = it->path().wstring();
+        candidate.exists = DirectoryExists(candidate.path);
+        std::wstring deleteExisting = ToLower(Trim(XmlElementValue(xml, L"DeleteExistingFiles")));
+        candidate.deleteExistingFiles = deleteExisting == L"true" || deleteExisting == L"1";
+        candidate.score = configurationRank * 100 + (candidate.exists ? 1000 : 0);
+        if (!publishDir.empty()) candidate.score += 10;
+        if (lowerValue.find(L"publish") != std::wstring::npos) candidate.score += 5;
+        if (ToLower(FileNameOf(candidate.profilePath)).find(L"release") != std::wstring::npos)
+            candidate.score += 20;
+
+        std::error_code timeError;
+        candidate.modified = it->last_write_time(timeError);
+        candidate.hasModified = !timeError;
+        result.push_back(std::move(candidate));
+    }
+
+    std::sort(result.begin(), result.end(), [](const PublishProfileCandidate& a, const PublishProfileCandidate& b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.hasModified != b.hasModified) return a.hasModified;
+        if (a.hasModified && a.modified != b.modified) return a.modified > b.modified;
+        return _wcsicmp(a.path.c_str(), b.path.c_str()) < 0;
+    });
+    return result;
+}
+
+std::wstring ProjectOutputDir(const Project& project, bool release) {
+    std::wstring root = NormalizeFsPath(project.rootPath);
+    if (root.empty()) return {};
+    if (project.kind() == Kind::Frontend) {
+        for (const wchar_t* name : { L"dist", L"build", L"out", L".next" }) {
+            std::wstring candidate = JoinPath(root, name);
+            if (DirectoryExists(candidate)) return NormalizeFsPath(candidate);
+        }
+        return root;
+    }
+
+    std::wstring configuration = release ? L"Release" : L"Debug";
+    std::wstring projectFile = project.projectFile;
+    if (projectFile.empty()) projectFile = FindCsproj(root);
+    else if (!IsAbsoluteFsPath(projectFile)) projectFile = ResolveMsBuildPath(root, projectFile);
+    std::wstring projectDir = projectFile.empty() ? root : DirectoryOf(projectFile);
+    if (projectDir.empty()) projectDir = root;
+    std::wstring xml = projectFile.empty() ? L"" : Widen(ReadTextFile(projectFile));
+    MsBuildOutputInfo info = ReadMsBuildOutputInfo(xml, release);
+    std::wstring targetFramework = FirstTargetFramework(info);
+    std::wstring outputValue = ExpandMsBuildValue(info.outputPath, info, projectDir, configuration, L"");
+    std::wstring outputRoot;
+    std::vector<std::wstring> candidates;
+
+    bool appendTargetFramework = info.sdk;
+    if (!info.appendTargetFramework.empty()) {
+        appendTargetFramework = _wcsicmp(info.appendTargetFramework.c_str(), L"false") != 0 &&
+            _wcsicmp(info.appendTargetFramework.c_str(), L"0") != 0;
+    }
+
+    if (!outputValue.empty()) {
+        outputRoot = ResolveMsBuildPath(projectDir, outputValue);
+        if (appendTargetFramework && !targetFramework.empty() && !SameLeafName(outputRoot, targetFramework))
+            candidates.push_back(AppendFsDir(outputRoot, targetFramework));
+        candidates.push_back(outputRoot);
+    } else {
+        std::wstring baseValue = ExpandMsBuildValue(info.baseOutputPath, info, projectDir, configuration, L"");
+        std::wstring baseDir = baseValue.empty() ? JoinPath(projectDir, L"bin") : ResolveMsBuildPath(projectDir, baseValue);
+        std::wstring configDir = AppendFsDir(baseDir, configuration);
+        if (appendTargetFramework && !targetFramework.empty())
+            candidates.push_back(AppendFsDir(configDir, targetFramework));
+        candidates.push_back(configDir);
+    }
+
+    std::wstring publishBase = outputRoot;
+    if (publishBase.empty() && !candidates.empty()) publishBase = candidates.front();
+    std::vector<PublishProfileCandidate> profiles = FindPublishProfiles(projectDir, info, release, publishBase);
+    std::wstring profileFallback;
+    for (const auto& profile : profiles) {
+        if (profile.exists) return profile.path;
+        if (profileFallback.empty()) profileFallback = profile.path;
+    }
+    // A file-system publish profile is authoritative even before its target
+    // directory exists. Do not let an old bin\...\publish directory win over
+    // the profile the user selected in Visual Studio.
+    if (!profileFallback.empty()) return profileFallback;
+
+    std::wstring publishValue = ExpandMsBuildValue(info.publishDir, info, projectDir, configuration, publishBase);
+    std::wstring publishDir = ResolveMsBuildPath(projectDir, publishValue);
+    if (!publishDir.empty() && DirectoryExists(publishDir)) return NormalizeFsPath(publishDir);
+
+    std::vector<std::wstring> existing;
+    for (const auto& candidate : candidates) {
+        if (!DirectoryExists(candidate)) continue;
+        std::wstring publish = FindPublishUnder(candidate, targetFramework);
+        if (!publish.empty()) return publish;
+        existing.push_back(candidate);
+    }
+    if (!existing.empty()) return NormalizeFsPath(existing.front());
+    return candidates.empty() ? std::wstring() : NormalizeFsPath(candidates.front());
+}
+
 static std::wstring FindServiceName(const std::wstring& root, const std::wstring& fallback) {
     std::error_code ec;
     std::wregex re(LR"re(ServiceName\s*=\s*"([^"]+)")re", std::regex::icase);
@@ -494,6 +979,163 @@ static std::wstring FindMsBuild() {
     return L"msbuild";
 }
 
+static std::wstring ProjectPublishProfilePath(const Project& project, std::wstring* publishTarget = nullptr,
+    bool* deleteExistingFiles = nullptr) {
+    if (publishTarget) publishTarget->clear();
+    if (deleteExistingFiles) *deleteExistingFiles = false;
+    std::wstring root = NormalizeFsPath(project.rootPath);
+    if (root.empty()) return {};
+    std::wstring projectFile = project.projectFile;
+    if (projectFile.empty()) projectFile = FindCsproj(root);
+    else if (!IsAbsoluteFsPath(projectFile)) projectFile = ResolveMsBuildPath(root, projectFile);
+    if (projectFile.empty()) return {};
+    std::wstring projectDir = DirectoryOf(projectFile);
+    if (projectDir.empty()) projectDir = root;
+
+    std::wstring xml = Widen(ReadTextFile(projectFile));
+    MsBuildOutputInfo info = ReadMsBuildOutputInfo(xml, true);
+    std::wstring targetFramework = FirstTargetFramework(info);
+    std::wstring outputValue = ExpandMsBuildValue(info.outputPath, info, projectDir, L"Release", L"");
+    std::wstring outputBase;
+    if (!outputValue.empty()) {
+        outputBase = ResolveMsBuildPath(projectDir, outputValue);
+    } else {
+        std::wstring baseValue = ExpandMsBuildValue(info.baseOutputPath, info, projectDir, L"Release", L"");
+        std::wstring baseDir = baseValue.empty() ? JoinPath(projectDir, L"bin") : ResolveMsBuildPath(projectDir, baseValue);
+        std::wstring configDir = AppendFsDir(baseDir, L"Release");
+        if (info.sdk && !targetFramework.empty()) outputBase = AppendFsDir(configDir, targetFramework);
+        else outputBase = configDir;
+    }
+
+    auto profiles = FindPublishProfiles(projectDir, info, true, outputBase);
+    if (profiles.empty()) return {};
+    if (publishTarget) *publishTarget = profiles.front().path;
+    if (deleteExistingFiles) *deleteExistingFiles = profiles.front().deleteExistingFiles;
+    return profiles.front().profilePath;
+}
+
+bool ClearPublishTarget(const std::wstring& target, const std::wstring& projectRoot, std::wstring* error) {
+    if (error) error->clear();
+    std::wstring path = NormalizeFsPath(target);
+    std::wstring root = NormalizeFsPath(projectRoot);
+    if (path.empty()) {
+        if (error) *error = L"发布目标为空，已取消清理。";
+        return false;
+    }
+    if ((path.size() == 2 && path[1] == L':') ||
+        (path.size() == 3 && path[1] == L':' && path[2] == L'\\') ||
+        path.rfind(L"\\\\", 0) == 0) {
+        if (error) *error = L"发布目标是磁盘根目录或网络路径，已取消清理：" + path;
+        return false;
+    }
+    if (!root.empty()) {
+        std::wstring lowerPath = ToLower(path);
+        std::wstring lowerRoot = ToLower(root);
+        if (lowerPath == lowerRoot || lowerRoot.rfind(lowerPath + L"\\", 0) == 0) {
+            if (error) *error = L"发布目标包含项目目录，已取消清理：" + path;
+            return false;
+        }
+    }
+
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) return true;
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (error) *error = L"发布目标不是目录：" + path;
+        return false;
+    }
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+        if (error) *error = L"发布目标是链接或重解析点，已取消清理：" + path;
+        return false;
+    }
+
+    std::error_code ec;
+    fs::directory_iterator it(fs::path(path), ec);
+    if (ec) {
+        if (error) *error = L"无法读取发布目录 " + path + L"：" + Widen(ec.message());
+        return false;
+    }
+    for (; it != fs::directory_iterator(); it.increment(ec)) {
+        if (ec) {
+            if (error) *error = L"无法读取发布目录 " + path + L"：" + Widen(ec.message());
+            return false;
+        }
+        std::error_code removeError;
+        fs::remove_all(it->path(), removeError);
+        if (removeError) {
+            if (error) *error = L"无法删除 " + it->path().wstring() + L"：" + Widen(removeError.message());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CleanProjectPublishTarget(const Project& project, std::wstring* error) {
+    if (error) error->clear();
+    std::wstring publishTarget;
+    bool deleteExistingFiles = false;
+    std::wstring profile = ProjectPublishProfilePath(project, &publishTarget, &deleteExistingFiles);
+    if (profile.empty() || !deleteExistingFiles || publishTarget.empty()) return true;
+    return ClearPublishTarget(publishTarget, project.rootPath, error);
+}
+
+std::wstring ProjectBuildCommand(const Project& project, bool release) {
+    Kind kind = project.kind();
+    if (kind == Kind::Frontend) return {};
+    std::wstring root = NormalizeFsPath(project.rootPath);
+    if (root.empty()) return {};
+
+    std::wstring projectFile = project.projectFile;
+    if (projectFile.empty()) projectFile = FindCsproj(root);
+    else if (!IsAbsoluteFsPath(projectFile)) projectFile = ResolveMsBuildPath(root, projectFile);
+    if (projectFile.empty()) return {};
+
+    std::wstring xml = Widen(ReadTextFile(projectFile));
+    std::wstring lowerXml = ToLower(xml);
+    bool sdk = lowerXml.find(L"<project sdk=") != std::wstring::npos ||
+        lowerXml.find(L"microsoft.net.sdk") != std::wstring::npos;
+
+    if (kind == Kind::DotNet || (kind == Kind::WindowsService && sdk)) {
+        if (release) {
+            std::wstring publishTarget;
+            std::wstring profile = ProjectPublishProfilePath(project, &publishTarget);
+            if (!profile.empty()) {
+                std::wstring command = L"dotnet publish " + Quote(projectFile) +
+                    L" --configuration Release --nologo -v:m -p:PublishProfile=" + Quote(profile);
+                // dotnet publish understands PublishDir but does not honor the
+                // Visual Studio-only PublishUrl element. Force the profile's
+                // resolved file-system target so the real Release output is the
+                // same directory Visual Studio would publish to.
+                if (!publishTarget.empty())
+                    command += L" -p:PublishDir=" + Quote(publishTarget);
+                return command;
+            }
+            return L"dotnet publish " + Quote(projectFile) + L" --configuration Release --nologo -v:m";
+        }
+        return L"dotnet build " + Quote(projectFile) +
+            L" --configuration Debug --no-incremental --nologo -v:m";
+    }
+
+    std::wstring msbuild = FindMsBuild();
+    if (release) {
+        std::wstring publishTarget;
+        std::wstring profile = ProjectPublishProfilePath(project, &publishTarget);
+        if (!profile.empty()) {
+            std::wstring command = Quote(msbuild) + L" " + Quote(projectFile) +
+                L" /t:Publish /p:Configuration=Release /p:PublishProfile=" + Quote(profile) +
+                L" /m /nologo /v:m";
+            // Visual Studio profiles store the folder target in PublishUrl;
+            // MSBuild publish uses PublishDir.
+            if (!publishTarget.empty())
+                command += L" /p:PublishDir=" + Quote(publishTarget);
+            return command;
+        }
+        return Quote(msbuild) + L" " + Quote(projectFile) +
+            L" /t:Rebuild /p:Configuration=Release /m /nologo /v:m";
+    }
+    return Quote(msbuild) + L" " + Quote(projectFile) +
+        L" /t:Rebuild /p:Configuration=Debug /m /nologo /v:m";
+}
+
 Detection Engine::DetectFolder(const std::wstring& folder) {
     Detection d;
     d.project.id = GenerateId();
@@ -577,8 +1219,8 @@ Detection Engine::DetectFolder(const std::wstring& folder) {
         d.project.notes = L"通过 Windows 服务控制管理器启动 / 停止；通常需要管理员权限。";
         if (!csproj.empty()) {
             std::wstring msbuild = FindMsBuild();
-            d.project.buildCommandDebug = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Build /p:Configuration=Debug /m /nologo /v:m";
-            d.project.buildCommandRelease = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Build /p:Configuration=Release /m /nologo /v:m";
+            d.project.buildCommandDebug = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Rebuild /p:Configuration=Debug /m /nologo /v:m";
+            d.project.buildCommandRelease = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Rebuild /p:Configuration=Release /m /nologo /v:m";
         }
         d.ok = true;
         d.message = L"识别为 Windows 服务：" + d.project.serviceName;
@@ -621,8 +1263,8 @@ Detection Engine::DetectFolder(const std::wstring& folder) {
         d.project.url = L"http://localhost:" + std::to_wstring(port);
         d.project.startCommand = L"dotnet run --project " + Quote(csproj) + L" --configuration Debug";
         if (!profile.empty()) d.project.startCommand += L" --launch-profile " + Quote(profile);
-        d.project.buildCommandDebug = L"dotnet build " + Quote(csproj) + L" --configuration Debug --nologo -v:m";
-        d.project.buildCommandRelease = L"dotnet build " + Quote(csproj) + L" --configuration Release --nologo -v:m";
+        d.project.buildCommandDebug = L"dotnet build " + Quote(csproj) + L" --configuration Debug --no-incremental --nologo -v:m";
+        d.project.buildCommandRelease = L"dotnet publish " + Quote(csproj) + L" --configuration Release --nologo -v:m";
         d.project.environment[L"ASPNETCORE_ENVIRONMENT"] = L"Development";
         d.project.notes = L"预期端口 " + std::to_wstring(port) + L"；实际端口以进程监听为准。";
         d.ok = true;
@@ -644,8 +1286,8 @@ Detection Engine::DetectFolder(const std::wstring& folder) {
         d.project.url = L"http://localhost:" + std::to_wstring(port);
         d.project.startCommand = Quote(iis) + L" /path:" + Quote(folder) + L" /port:" + std::to_wstring(port) + L" /systray:false /clr:v4.0";
         std::wstring msbuild = FindMsBuild();
-        d.project.buildCommandDebug = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Build /p:Configuration=Debug /m /nologo /v:m";
-        d.project.buildCommandRelease = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Build /p:Configuration=Release /m /nologo /v:m";
+        d.project.buildCommandDebug = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Rebuild /p:Configuration=Debug /m /nologo /v:m";
+        d.project.buildCommandRelease = Quote(msbuild) + L" " + Quote(csproj) + L" /t:Rebuild /p:Configuration=Release /m /nologo /v:m";
         d.project.notes = L"使用 IIS Express 运行，停止时会结束整个进程树。";
         d.ok = true;
         d.message = L"识别为 .NET Framework ASP.NET 站点";
@@ -663,7 +1305,7 @@ Engine::Engine() { Load(); }
 
 Engine::~Engine() { Shutdown(); }
 
-std::wstring Engine::WorkspacePath() const { return JoinPath(DataDirectory(), L"workspace.json"); }
+std::wstring Engine::WorkspacePath() const { return ConfigPath(); }
 
 static std::wstring JsonStr(const Json& o, const char* key, const std::wstring& def = L"") {
     auto* v = o.find(key);
@@ -685,12 +1327,14 @@ bool Engine::Load(std::wstring* error) {
     std::string perr;
     Json root = Json::Parse(text, &perr);
     if (root.type != Json::Type::Object) {
-        if (error) *error = L"workspace.json 解析失败：" + Widen(perr);
-        AppLog(L"workspace.json 解析失败：" + Widen(perr));
+        if (error) *error = L"配置文件解析失败：" + Widen(perr);
+        AppLog(L"配置文件解析失败：" + Widen(perr));
         loaded_ = true;
         return false;
     }
-    if (auto* arr = root.arr("projects")) {
+    const Json* workspace = root.obj("workspace");
+    if (!workspace) { loaded_ = true; return true; }
+    if (auto* arr = workspace->arr("projects")) {
         for (auto& p : arr->array) {
             if (p.type != Json::Type::Object) continue;
             Project x;
@@ -731,8 +1375,8 @@ bool Engine::Load(std::wstring* error) {
 
 bool Engine::Save(std::wstring* error) {
     std::lock_guard lk(mutex_);
-    Json root; root.type = Json::Type::Object;
-    root.object.emplace_back("version", JNum(1));
+    Json workspace; workspace.type = Json::Type::Object;
+    workspace.object.emplace_back("version", JNum(1));
     Json arr; arr.type = Json::Type::Array;
     for (auto& p : projects_) {
         Json o; o.type = Json::Type::Object;
@@ -759,7 +1403,7 @@ bool Engine::Save(std::wstring* error) {
         o.object.emplace_back("createdAt", J(p.createdAt));
         arr.array.push_back(std::move(o));
     }
-    root.object.emplace_back("projects", std::move(arr));
+    workspace.object.emplace_back("projects", std::move(arr));
     Json opts; opts.type = Json::Type::Object;
     opts.object.emplace_back("theme", J(L"System"));
     opts.object.emplace_back("showFlyoutOnHover", JBool(true));
@@ -767,17 +1411,22 @@ bool Engine::Save(std::wstring* error) {
     opts.object.emplace_back("closeToTray", JBool(true));
     opts.object.emplace_back("autoStartProjects", JBool(true));
     opts.object.emplace_back("refreshIntervalSeconds", JNum(2));
-    root.object.emplace_back("options", std::move(opts));
+    workspace.object.emplace_back("options", std::move(opts));
 
-    std::wstring path = WorkspacePath();
-    if (FileExists(path)) CopyFileW(path.c_str(), (path + L".bak").c_str(), FALSE);
-    std::wstring temp = path + L".tmp";
-    if (!WriteTextFile(temp, root.dump(2))) {
-        if (error) *error = L"写入 workspace.json 失败";
-        return false;
+    // The settings live in the same file; preserve them when projects change.
+    Json document;
+    std::string existing = ReadTextFile(ConfigPath());
+    if (!existing.empty()) {
+        std::string perr;
+        document = Json::Parse(existing, &perr);
+        if (document.type != Json::Type::Object) document = Json{};
     }
-    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        if (error) *error = Format(L"替换 workspace.json 失败（%lu）", GetLastError());
+    Json out; out.type = Json::Type::Object;
+    out.object.emplace_back("version", JNum(1));
+    if (auto* settings = document.obj("settings")) out.object.emplace_back("settings", *settings);
+    out.object.emplace_back("workspace", std::move(workspace));
+    if (!SaveConfigDocument(out.dump(2), error)) {
+        if (error && error->empty()) *error = L"保存配置文件失败";
         return false;
     }
     return true;

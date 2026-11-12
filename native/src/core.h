@@ -22,7 +22,10 @@ std::string Narrow(const std::wstring& s);
 std::wstring Trim(std::wstring s);
 std::wstring ToLower(std::wstring s);
 std::wstring Format(const wchar_t* fmt, ...);
+std::wstring ExecutablePath();
 std::wstring DataDirectory();
+std::wstring ConfigPath();
+bool SaveConfigDocument(const std::string& text, std::wstring* error = nullptr);
 std::wstring AppLogPath();
 void AppLog(const std::wstring& text);
 bool FileExists(const std::wstring& path);
@@ -67,6 +70,32 @@ struct Project {
     std::wstring DisplayName() const { return alias.empty() ? name : alias; }
     Kind kind() const { return KindFromText(kindText); }
 };
+
+// Resolves the directory that actually holds the build artifacts for a
+// project. For .NET projects this reads the selected configuration's
+// OutputPath/PublishDir from the .csproj (including Release-only property
+// groups) and then prefers an existing publish/output directory. It never
+// returns the project root just because bin\<Configuration> is missing.
+std::wstring ProjectOutputDir(const Project& project, bool release);
+
+// Builds the command used by the Build/Release buttons. .NET projects are
+// rebuilt for Debug and published with a real Properties/PublishProfiles
+// profile for Release; frontend projects return empty and keep their
+// configured commands.
+std::wstring ProjectBuildCommand(const Project& project, bool release);
+
+// Removes the contents of a file-system publish target before a Release
+// publish. Visual Studio's DeleteExistingFiles option is not honored by
+// `dotnet publish`, so the caller applies it explicitly. The project root,
+// ancestors of the project, drive roots, UNC paths, and reparse-point targets
+// are rejected so a bad profile cannot erase source code.
+bool ClearPublishTarget(const std::wstring& target, const std::wstring& projectRoot,
+    std::wstring* error = nullptr);
+
+// Applies the selected .NET publish profile's DeleteExistingFiles option.
+// Returns true when there is nothing to clean or the target was cleared;
+// returns false for an unsafe target or a deletion failure.
+bool CleanProjectPublishTarget(const Project& project, std::wstring* error = nullptr);
 
 struct Snapshot {
     Project project;

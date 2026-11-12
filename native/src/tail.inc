@@ -671,6 +671,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g = new AppState();
     g->instance = instance;
     LoadSettings();
+    if (!FileExists(ConfigPath())) {
+        std::wstring configError;
+        if (!SaveSettings(nullptr, &configError)) AppLog(L"创建默认配置失败：" + configError);
+    }
     g->dark = EffectiveDark();
     g->colors = MakeColors(g->dark);
     g->iconApp = LoadIconResource(instance, IDI_APP);

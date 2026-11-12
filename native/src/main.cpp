@@ -151,10 +151,6 @@ struct AppSettings {
 
 static AppSettings g_settings;
 
-static std::wstring SettingsPath() {
-    return JoinPath(DataDirectory(), L"settings.json");
-}
-
 static std::wstring ColorToHex(unsigned int rgb) {
     return Format(L"#%02X%02X%02X", (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
@@ -169,36 +165,82 @@ static unsigned int ParseColorHex(const std::string& text, unsigned int fallback
     return (unsigned int)value & 0xFFFFFF;
 }
 
+static dsm::Json EmptyWorkspaceNode() {
+    dsm::Json workspace;
+    workspace.type = dsm::Json::Type::Object;
+    dsm::Json version; version.type = dsm::Json::Type::Number; version.number = 1;
+    dsm::Json projects; projects.type = dsm::Json::Type::Array;
+    workspace.object.emplace_back("version", std::move(version));
+    workspace.object.emplace_back("projects", std::move(projects));
+    return workspace;
+}
+
+static dsm::Json SettingsNode(const AppSettings& settings) {
+    dsm::Json o;
+    o.type = dsm::Json::Type::Object;
+    dsm::Json theme; theme.type = dsm::Json::Type::Number; theme.number = settings.themeMode;
+    o.object.emplace_back("themeMode", std::move(theme));
+    dsm::Json follow; follow.type = dsm::Json::Type::Bool; follow.boolean = settings.followSystemAccent;
+    o.object.emplace_back("followSystemAccent", std::move(follow));
+    dsm::Json color; color.type = dsm::Json::Type::String; color.text = Narrow(ColorToHex(settings.primaryColor));
+    o.object.emplace_back("primaryColor", std::move(color));
+    dsm::Json tray; tray.type = dsm::Json::Type::Bool; tray.boolean = settings.startMinimized;
+    o.object.emplace_back("startMinimized", std::move(tray));
+    dsm::Json confirm; confirm.type = dsm::Json::Type::Bool; confirm.boolean = settings.confirmExit;
+    o.object.emplace_back("confirmExit", std::move(confirm));
+    dsm::Json anim; anim.type = dsm::Json::Type::Bool; anim.boolean = settings.animations;
+    o.object.emplace_back("animations", std::move(anim));
+    return o;
+}
+
+static dsm::Json LoadConfigRoot() {
+    std::string text = ReadTextFile(ConfigPath());
+    if (text.empty()) return {};
+    dsm::Json root = dsm::Json::Parse(text);
+    return root.type == dsm::Json::Type::Object ? root : dsm::Json{};
+}
+
+static dsm::Json WorkspaceNodeFromConfig(const dsm::Json& root) {
+    if (auto* workspace = root.obj("workspace")) return *workspace;
+    return EmptyWorkspaceNode();
+}
+
 static void LoadSettings() {
     g_settings = AppSettings{};
-    std::wstring path = SettingsPath();
+    std::wstring path = ConfigPath();
     if (!FileExists(path)) return;
-    std::string text = ReadTextFile(path);
-    if (text.empty()) return;
-    dsm::Json json = dsm::Json::Parse(text);
-    if (json.type != dsm::Json::Type::Object) return;
-    g_settings.themeMode = std::clamp(json.integer("themeMode", 0), 0, 2);
-    g_settings.followSystemAccent = json.flag("followSystemAccent", false);
-    g_settings.primaryColor = ParseColorHex(json.str("primaryColor", "#2F8F83"), 0x2F8F83);
-    g_settings.startMinimized = json.flag("startMinimized", false);
-    g_settings.confirmExit = json.flag("confirmExit", true);
-    g_settings.animations = json.flag("animations", true);
+    dsm::Json root = LoadConfigRoot();
+    if (root.type != dsm::Json::Type::Object) return;
+    const dsm::Json* json = root.obj("settings");
+    if (!json) return;
+    g_settings.themeMode = std::clamp(json->integer("themeMode", 0), 0, 2);
+    g_settings.followSystemAccent = json->flag("followSystemAccent", false);
+    g_settings.primaryColor = ParseColorHex(json->str("primaryColor", "#2F8F83"), 0x2F8F83);
+    g_settings.startMinimized = json->flag("startMinimized", false);
+    g_settings.confirmExit = json->flag("confirmExit", true);
+    g_settings.animations = json->flag("animations", true);
 }
 
-static std::string SettingsJson(const AppSettings& settings) {
-    std::string text = "{\n";
-    text += "  \"themeMode\": " + std::to_string(settings.themeMode) + ",\n";
-    text += std::string("  \"followSystemAccent\": ") + (settings.followSystemAccent ? "true" : "false") + ",\n";
-    text += "  \"primaryColor\": \"" + Narrow(ColorToHex(settings.primaryColor)) + "\",\n";
-    text += std::string("  \"startMinimized\": ") + (settings.startMinimized ? "true" : "false") + ",\n";
-    text += std::string("  \"confirmExit\": ") + (settings.confirmExit ? "true" : "false") + ",\n";
-    text += std::string("  \"animations\": ") + (settings.animations ? "true" : "false") + "\n";
-    text += "}\n";
-    return text;
-}
+static bool SaveSettings(const std::string* workspaceOverride = nullptr, std::wstring* error = nullptr) {
+    dsm::Json workspace = EmptyWorkspaceNode();
+    if (workspaceOverride) {
+        dsm::Json parsed = dsm::Json::Parse(*workspaceOverride);
+        if (parsed.type != dsm::Json::Type::Object) {
+            if (error) *error = L"导入的工作区不是有效的 JSON 对象。";
+            return false;
+        }
+        workspace = std::move(parsed);
+    } else {
+        workspace = WorkspaceNodeFromConfig(LoadConfigRoot());
+    }
 
-static bool SaveSettings() {
-    return WriteTextFile(SettingsPath(), SettingsJson(g_settings));
+    dsm::Json root;
+    root.type = dsm::Json::Type::Object;
+    dsm::Json version; version.type = dsm::Json::Type::Number; version.number = 1;
+    root.object.emplace_back("version", std::move(version));
+    root.object.emplace_back("settings", SettingsNode(g_settings));
+    root.object.emplace_back("workspace", std::move(workspace));
+    return SaveConfigDocument(root.dump(2), error);
 }
 
 static bool EffectiveDark() {
@@ -538,7 +580,8 @@ static void RefreshTheme();
 static void ApplyDarkTitle(HWND hwnd);
 static void ShowInfoDialog(HWND owner, const std::wstring& title, const std::wstring& message);
 static bool ShowConfirmDialog(HWND owner, const std::wstring& title, const std::wstring& message,
-    const std::wstring& primary, const std::wstring& secondary, bool danger = false);
+    const std::wstring& primary, const std::wstring& secondary, bool danger = false,
+    bool topmost = false);
 static bool ShowEditProjectDialog(HWND owner, Project& project);
 static void StartBuild(const Snapshot& snapshot, bool release);
 static std::wstring BuildOutputDir(const Project& project, bool release);
@@ -1648,6 +1691,17 @@ static std::wstring ServiceExecutablePath(const Project& project) {
     std::wstring stem = project.projectFile.empty()
         ? project.name : std::filesystem::path(project.projectFile).stem().wstring();
     if (stem.empty()) stem = project.name;
+    // Prefer the resolved Debug/Release artifact directories. This covers
+    // custom OutputPath values and SDK projects whose exe lives under a
+    // target-framework or publish subdirectory.
+    for (bool release : { false, true }) {
+        std::wstring dir = ProjectOutputDir(project, release);
+        if (dir.empty()) continue;
+        std::wstring path = JoinPath(dir, stem + L".exe");
+        if (FileExists(path)) return path;
+        path = JoinPath(dir, project.name + L".exe");
+        if (FileExists(path)) return path;
+    }
     for (const wchar_t* config : { L"Debug", L"Release" }) {
         std::wstring path = JoinPath(project.rootPath,
             std::wstring(L"bin\\") + config + L"\\" + stem + L".exe");
@@ -1925,32 +1979,37 @@ static void OpenFolderPath(const std::wstring& path) {
 }
 
 static std::wstring BuildOutputDir(const Project& project, bool release) {
-    namespace fs = std::filesystem;
-    std::wstring root = project.rootPath;
-    if (project.kind() == Kind::Frontend) {
-        for (const wchar_t* name : { L"dist", L"build", L"out", L".next" }) {
-            std::wstring candidate = JoinPath(root, name);
-            if (DirectoryExists(candidate)) return candidate;
-        }
-        return root;
-    }
-    std::wstring base = JoinPath(root, release ? L"bin\\Release" : L"bin\\Debug");
-    if (!DirectoryExists(base)) return root;
-    std::error_code ec;
-    for (auto& e : fs::directory_iterator(fs::path(base), ec)) {
-        if (!e.is_directory()) continue;
-        std::wstring name = e.path().filename().wstring();
-        if (name.rfind(L"net", 0) == 0 || name == L"publish") return e.path().wstring();
-    }
-    return base;
+    return ProjectOutputDir(project, release);
+}
+
+static bool LooksLikeGeneratedBuildCommand(const std::wstring& command) {
+    std::wstring lower = ToLower(command);
+    return lower.find(L"dotnet build") != std::wstring::npos ||
+        lower.find(L"dotnet publish") != std::wstring::npos ||
+        lower.find(L"/t:build") != std::wstring::npos ||
+        lower.find(L"/t:rebuild") != std::wstring::npos ||
+        lower.find(L"/t:publish") != std::wstring::npos;
 }
 
 static void StartBuild(const Snapshot& snapshot, bool release) {
     std::wstring command = release ? snapshot.project.buildCommandRelease : snapshot.project.buildCommandDebug;
+    std::wstring generated = ProjectBuildCommand(snapshot.project, release);
+    bool generatedUsed = false;
+    if (!generated.empty() && (command.empty() || LooksLikeGeneratedBuildCommand(command))) {
+        command = generated;
+        generatedUsed = true;
+    }
     if (command.empty()) {
         ShowInfoDialog(g->main, L"没有编译命令",
             L"这个项目没有可用的" + std::wstring(release ? L" Release " : L" Debug ") + L"编译命令。");
         return;
+    }
+    if (release && generatedUsed) {
+        std::wstring clearError;
+        if (!CleanProjectPublishTarget(snapshot.project, &clearError)) {
+            ShowInfoDialog(g->main, L"无法清理发布目录", clearError);
+            return;
+        }
     }
     if (g_building.count(snapshot.project.id)) {
         ShowInfoDialog(g->main, L"正在编译", L"这个项目已经在编译中，请等待完成。");
@@ -1995,10 +2054,20 @@ static void FinishBuild(BuildJobResult* result) {
     if (!result) return;
     g_building.erase(result->id);
     if (result->success) {
-        if (result->release) OpenFolderPath(result->outputDir);
+        // The directory may not exist until the first build has completed.
+        // Resolve it again after compilation so the dialog and Explorer open
+        // the real output/publish directory (including .NET Release paths
+        // read from the project file), not the pre-build fallback.
+        std::wstring outputDir = result->outputDir;
+        Snapshot built = g->engine.Get(result->id);
+        if (!built.project.id.empty()) {
+            std::wstring resolved = BuildOutputDir(built.project, result->release);
+            if (!resolved.empty()) outputDir = resolved;
+        }
+        if (result->release) OpenFolderPath(outputDir);
         ShowInfoDialog(g->main, L"编译完成",
             L"「" + result->name + L"」" + (result->release ? L" Release" : L" Debug") +
-            L" 编译成功。\n\n输出目录：\n" + result->outputDir);
+            L" 编译成功。\n\n输出目录：\n" + outputDir);
     } else {
         std::wstring msg = L"「" + result->name + L"」编译失败。\n\n是否打开编译日志？";
         if (ShowConfirmDialog(g->main, L"编译失败", msg, L"打开日志", L"关闭", true))
@@ -2398,7 +2467,7 @@ static void RequestExit() {
     for (auto& s : snaps) if (IsActive(s.status)) ++running;
     if (running > 0 && g_settings.confirmExit) {
         std::wstring msg = Format(L"还有 %d 个项目在运行。\n\n退出会结束由 DevServeManage 启动的进程（Windows 服务不会被停止）。确定退出？", running);
-        if (!ShowConfirmDialog(g->main, L"退出 DevServeManage", msg, L"退出", L"取消", true))
+        if (!ShowConfirmDialog(g->main, L"退出 DevServeManage", msg, L"退出", L"取消", true, true))
             return;
     }
     g->exiting = true;

@@ -2,10 +2,17 @@ $ErrorActionPreference = 'Stop'
 $native = $PSScriptRoot
 $root = Split-Path -Parent $native
 $kit = if ($env:W64DEVKIT) { $env:W64DEVKIT } else { Join-Path (Split-Path -Parent $root) '.tools\w64kit\w64devkit' }
-if (-not (Test-Path (Join-Path $kit 'bin\g++.exe'))) {
+if (-not (Test-Path (Join-Path $kit 'bin'))) {
     throw ('w64devkit not found: ' + $kit)
 }
 $gxx = Join-Path $kit 'bin\g++.exe'
+$useGccDriver = $false
+if (-not (Test-Path $gxx)) {
+    # Some w64devkit archives omit the g++ alias but still ship the C++ frontend.
+    $gxx = Join-Path $kit 'bin\gcc.exe'
+    $useGccDriver = $true
+}
+if (-not (Test-Path $gxx)) { throw ('C++ compiler not found: ' + $gxx) }
 $windres = Join-Path $kit 'bin\windres.exe'
 $out = Join-Path $native 'dist'
 $build = Join-Path $native 'build'
@@ -25,6 +32,7 @@ try {
         '-lshell32', '-lshlwapi', '-luser32', '-lgdi32', '-ladvapi32',
         '-lcomctl32', '-liphlpapi', '-lws2_32', '-lcomdlg32', '-static'
     )
+    if ($useGccDriver) { $gxxArgs += '-lstdc++' }
     $compiler = Start-Process -FilePath $gxx -ArgumentList $gxxArgs -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput (Join-Path $build 'compiler.out') `
         -RedirectStandardError (Join-Path $build 'compiler.err')

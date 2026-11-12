@@ -25,7 +25,7 @@
 | 实际端口 | 读取 Windows TCP LISTENER 表，IPv4 + IPv6，包含监听 `127.0.0.1` 的 Vite / Next 项目 |
 | 运行信息 | 状态、PID、实际端口、启动时长、退出码、最近错误 |
 | 列表行按钮 | 启动/停止、重启、日志、Debug 编译、Release 编译、更多，全部为 32×32 图标按钮 |
-| 编译 | Debug / Release 构建，输出目录自动识别；Release 成功后自动打开输出目录 |
+| 编译 | Debug / Release 构建；读取 .NET 项目的 `OutputPath`、`PublishDir`，并优先解析 `Properties\PublishProfiles\*.pubxml` 的发布目录；profile 设置 `DeleteExistingFiles=true` 时先清空目标再完整 publish；Release 成功后自动打开最终输出/发布目录 |
 | 日志 | 每个项目独立日志；手动停止项目后清空该项目的运行日志；无日志时日志按钮禁用 |
 | 服务 | 识别 `ServiceInstaller` 中的服务名；未安装时卡片按钮变为「安装服务」，通过 UAC 调用 `InstallUtil.exe` 注册并启动；Windows 服务列表中的显示名称使用项目名称，SCM 内部服务名仍使用 `ServiceInstaller` 定义的名字 |
 | 端口冲突 | 启动前检查；运行失败时识别 `EADDRINUSE`，提示结束占用进程并重启 |
@@ -42,7 +42,7 @@
 | ASP.NET Core / .NET Worker / 控制台 | `*.csproj` + `launchSettings.json` | `dotnet run --project ...` |
 | 传统 ASP.NET（.NET Framework） | `web.config` / `UseIISExpress` | IIS Express |
 | .NET Framework Windows 服务 | `ProjectInstaller*.cs` / `ServiceBase` | Windows SCM |
-| .NET Framework 控制台 / WinForms / WPF | `*.csproj` | `bin\Debug\*.exe` |
+| .NET Framework 控制台 / WinForms / WPF | `*.csproj` | 按 Release/Debug 的 `OutputPath`（默认 `bin\<Configuration>\*.exe`） |
 
 > Windows 服务项目的入口如果无条件调用 `ServiceBase.Run(...)`，不能像普通控制台程序一样直接运行。DevServeManage 会在未安装时把卡片主按钮变成「安装服务」，通过 UAC 调用项目的 `InstallUtil.exe` 注册并启动，之后即可通过 SCM 启停。
 >
@@ -105,30 +105,31 @@ native\dist\DevServeManage.exe
 
 ![设置](native/docs/settings.png)
 
-设置文件：
+配置文件与 exe 位于同一目录，首次启动自动生成：
 
 ```text
-%APPDATA%\DevServeManage\settings.json
+<exe 所在目录>\DevServeManage.json
 ```
 
-项目工作区：
-
-```text
-%APPDATA%\DevServeManage\workspace.json
-```
+一个文件同时保存设置和项目工作区；配置不会写入 `%APPDATA%`、注册表或其他目录。默认配置的项目列表为空，不包含任何网站、项目或路径。
 
 运行日志：
 
 ```text
-%APPDATA%\DevServeManage\logs\<项目名>.log
+<exe 所在目录>\logs\<项目名>.log
+<exe 所在目录>\native.log
 ```
 
-导出的配置包含：
+导出 / 导入使用相同的单文件结构：
 
 ```json
 {
+  "version": 1,
   "settings": { "...": "..." },
-  "workspaceJson": "..."
+  "workspace": {
+    "version": 1,
+    "projects": []
+  }
 }
 ```
 
