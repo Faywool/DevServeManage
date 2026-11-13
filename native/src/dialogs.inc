@@ -57,13 +57,16 @@ static void PaintMessageDialog(MessageDialogState& s) {
     p.TextWrapped(s.message, MakeR(28, 82, W - 56, H - 158), 11.5f, 400, g->colors.sub);
 
     float btnY = H - 54;
-    float bw = 100, bh = 32;
-    s.primaryRect = MakeR(W - 28 - bw, btnY, bw, bh);
+    float primaryW = std::max(100.0f, p.Measure(s.primary, 11.5f, 600) + 30.0f);
+    float secondaryW = s.secondary.empty() ? 0.0f
+        : std::max(88.0f, p.Measure(s.secondary, 11.5f, 500) + 28.0f);
+    float bh = 32;
+    s.primaryRect = MakeR(W - 28 - primaryW, btnY, primaryW, bh);
     bool ph = s.primaryRect.has(g->mouseX, g->mouseY);
     DrawDialogButton(p, s.primaryRect, s.primary, s.danger ? g->colors.red : g->colors.accent,
         s.danger ? g->colors.redSoft : g->colors.white, ph);
     if (!s.secondary.empty()) {
-        s.secondaryRect = MakeR(s.primaryRect.x - 8 - bw, btnY, bw, bh);
+        s.secondaryRect = MakeR(s.primaryRect.x - 8 - secondaryW, btnY, secondaryW, bh);
         bool sh = s.secondaryRect.has(g->mouseX, g->mouseY);
         p.FillRound(s.secondaryRect, 7, sh ? g->colors.surface2 : g->colors.transparent);
         p.StrokeRound(s.secondaryRect, 7, g->colors.border, 1);

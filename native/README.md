@@ -73,7 +73,8 @@ native\dist\DevServeManage.exe
 - 优先读取 `Properties\PublishProfiles\*.pubxml` 中的 `PublishDir` / `PublishUrl`（仅文件系统发布；Web Deploy、FTP 等远程发布会被忽略）；
 - 再读取 `.csproj` 对应配置的 `OutputPath`、`BaseOutputPath`、`PublishDir`；
 - 优先返回已存在的 `publish` 目录或目标框架子目录，不会因为 `bin\<Configuration>` 不存在就返回项目根目录；
-- Release 发布时若所选 profile 设置了 `DeleteExistingFiles=true`，会先清空该 profile 的文件系统目标目录，再执行完整的 `dotnet publish`。`dotnet publish` 本身不处理这个 Visual Studio 选项，不清理会留下旧文件，导致文件数量和 VS 不一致。
+- Release 发布时若所选 profile 设置了 `DeleteExistingFiles=true`，会先清空该 profile 的文件系统目标目录，再执行完整的发布。`dotnet publish` 本身不处理这个 Visual Studio 选项，不清理会留下旧文件，导致文件数量和 VS 不一致。
+- 传统 ASP.NET（.NET Framework）WebSite / Web Application 的 Release 使用 MSBuild `/t:WebPublish`，并同时传入 `publishUrl`、`PublishUrl` 和 `PublishDir`。`/t:Publish` 对这类项目可能以退出码 0 静默结束，却不产生发布文件。
 
 ## 运行
 

@@ -1,20 +1,43 @@
-# DevServeManage
+<p align="center">
+  <img src="native/docs/app-icon.png" width="96" height="96" alt="DevServeManage">
+</p>
 
-**一个原生 Windows 本地项目运行台。**  
-把散落在多个终端里的前端 dev server、.NET Web API、IIS Express 站点和 Windows 服务收进一个常驻托盘的小工具。
+<h1 align="center">DevServeManage</h1>
 
-> GitHub: [Faywool/DevServeManage](https://github.com/Faywool/DevServeManage)  
-> Contact: [Faywool@Live.cn](mailto:Faywool@Live.cn)
+<p align="center">
+  <strong>一个原生 Windows 本地项目运行台。</strong><br>
+  把散落在多个终端里的前端 dev server、.NET Web API、IIS Express 站点和 Windows 服务收进一个常驻托盘的小工具。
+</p>
 
-- **C++20 + Win32 + Direct2D + DirectWrite**
-- 单文件原生 exe
-- 项目自动识别、启动 / 停止 / 重启、端口 / PID / 运行时长 / 日志
-- 卡片式 Debug / Release 构建，托盘快速查看，设置与 JSON 配置导入导出
-- MIT License
+<p align="center">
+  <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat-square" alt="C++20">
+  <img src="https://img.shields.io/badge/Win32-Direct2D-2F8F83?style=flat-square" alt="Win32 + Direct2D">
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?style=flat-square" alt="Windows 10 / 11">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License">
+</p>
 
-![主界面](native/docs/main.png)
+<p align="center">
+  <a href="https://github.com/Faywool/DevServeManage">GitHub</a>
+  ·
+  <a href="https://github.com/Faywool/DevServeManage/releases">Releases</a>
+  ·
+  <a href="mailto:Faywool@Live.cn">Faywool@Live.cn</a>
+</p>
+
+<p align="center">
+  <img src="native/docs/main.png" width="880" alt="DevServeManage 主界面">
+</p>
 
 > 截图使用虚构的示例项目，不包含真实项目路径。
+
+**核心特性**
+
+- **C++20 + Win32 + Direct2D + DirectWrite**：单文件原生 exe，不依赖 .NET 桌面运行时或 WebView。
+- **项目一站式管理**：自动识别项目类型，启动 / 停止 / 重启，查看端口、PID、运行时长和日志。
+- **Debug / Release 构建**：卡片式编译按钮；.NET Release 会读取 `Properties\PublishProfiles`，按 Visual Studio 的发布配置输出到真实目录。
+- **托盘常驻**：快速查看浮层、右键菜单、全部启动 / 停止 / 重启。
+- **可定制**：主题、Primary 颜色、动画、启动仅托盘、退出确认，以及单文件 JSON 配置导入导出。
+- **MIT License**：图标使用 [Lucide](https://lucide.dev/) SVG，运行时解析为 Direct2D geometry。
 
 ## 功能
 
@@ -25,7 +48,7 @@
 | 实际端口 | 读取 Windows TCP LISTENER 表，IPv4 + IPv6，包含监听 `127.0.0.1` 的 Vite / Next 项目 |
 | 运行信息 | 状态、PID、实际端口、启动时长、退出码、最近错误 |
 | 列表行按钮 | 启动/停止、重启、日志、Debug 编译、Release 编译、更多，全部为 32×32 图标按钮 |
-| 编译 | Debug / Release 构建；读取 .NET 项目的 `OutputPath`、`PublishDir`，并优先解析 `Properties\PublishProfiles\*.pubxml` 的发布目录；profile 设置 `DeleteExistingFiles=true` 时先清空目标再完整 publish；Release 成功后自动打开最终输出/发布目录 |
+| 编译 | Debug / Release 构建；读取 .NET 项目的 `OutputPath`、`PublishDir`，并优先解析 `Properties\PublishProfiles\*.pubxml` 的发布目录；profile 设置 `DeleteExistingFiles=true` 时先清空目标再完整 publish；Release 成功后弹窗提供「打开 Release 目录」按钮 |
 | 日志 | 每个项目独立日志；手动停止项目后清空该项目的运行日志；无日志时日志按钮禁用 |
 | 服务 | 识别 `ServiceInstaller` 中的服务名；未安装时卡片按钮变为「安装服务」，通过 UAC 调用 `InstallUtil.exe` 注册并启动；Windows 服务列表中的显示名称使用项目名称，SCM 内部服务名仍使用 `ServiceInstaller` 定义的名字 |
 | 端口冲突 | 启动前检查；运行失败时识别 `EADDRINUSE`，提示结束占用进程并重启 |

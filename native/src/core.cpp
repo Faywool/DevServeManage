@@ -1120,13 +1120,31 @@ std::wstring ProjectBuildCommand(const Project& project, bool release) {
         std::wstring publishTarget;
         std::wstring profile = ProjectPublishProfilePath(project, &publishTarget);
         if (!profile.empty()) {
+            // WebSite / Web Application projects use the WebPublish target.
+            // Plain /t:Publish is a no-op for these projects and exits 0 with
+            // an almost empty log, which is exactly how the Dashboard publish
+            // silently produced no files. Keep /t:Publish for non-web projects.
+            bool webProject = kind == Kind::AspNetFramework;
             std::wstring command = Quote(msbuild) + L" " + Quote(projectFile) +
-                L" /t:Publish /p:Configuration=Release /p:PublishProfile=" + Quote(profile) +
+                (webProject ? L" /t:WebPublish" : L" /t:Publish") +
+                L" /p:Configuration=Release /p:PublishProfile=" + Quote(profile) +
                 L" /m /nologo /v:m";
-            // Visual Studio profiles store the folder target in PublishUrl;
-            // MSBuild publish uses PublishDir.
-            if (!publishTarget.empty())
+            if (webProject) {
+                command += L" /p:WebPublishMethod=FileSystem"
+                    L" /p:LastUsedBuildConfiguration=Release"
+                    L" /p:DeleteExistingFiles=True";
+            }
+            // Visual Studio profiles store the folder target in PublishUrl.
+            // WebPublish reads the lowercase VS key, while MSBuild publish
+            // uses PublishDir; pass all three so both flows hit the same real
+            // target and the app's output resolver agrees with the build.
+            if (!publishTarget.empty()) {
+                if (webProject) {
+                    command += L" /p:publishUrl=" + Quote(publishTarget) +
+                        L" /p:PublishUrl=" + Quote(publishTarget);
+                }
                 command += L" /p:PublishDir=" + Quote(publishTarget);
+            }
             return command;
         }
         return Quote(msbuild) + L" " + Quote(projectFile) +

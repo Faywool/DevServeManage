@@ -644,6 +644,63 @@ static void DrawSpinner(Painter& p, R r, D2D1_COLOR_F color) {
     }
 }
 
+// A small comet that travels around the rounded button edge. This is kept
+// separate from DrawSpinner so the existing start-button icon animation can
+// remain while build / start / restart actions also show progress.
+static void DrawRunningBorder(Painter& p, R r, D2D1_COLOR_F color) {
+    if (!g_settings.animations || r.w < 12 || r.h < 12) return;
+    const float rad = 7.0f;
+    const float x = r.x + 0.5f, y = r.y + 0.5f;
+    const float w = r.w - 1.0f, h = r.h - 1.0f;
+    struct Point { float x, y; };
+    std::vector<Point> pts;
+    pts.reserve(64);
+    auto addLine = [&](float x1, float y1, float x2, float y2, int count) {
+        for (int i = 0; i < count; ++i) {
+            float t = (float)i / (float)count;
+            pts.push_back({ x1 + (x2 - x1) * t, y1 + (y2 - y1) * t });
+        }
+    };
+    auto addArc = [&](float cx, float cy, float radius, float a0, float a1, int count) {
+        for (int i = 0; i < count; ++i) {
+            float t = (float)i / (float)count;
+            float a = (a0 + (a1 - a0) * t) * 3.14159265358979323846f / 180.0f;
+            pts.push_back({ cx + (float)std::cos(a) * radius, cy + (float)std::sin(a) * radius });
+        }
+    };
+    addLine(x + rad, y, x + w - rad, y, 8);
+    addArc(x + w - rad, y + rad, rad, -90.0f, 0.0f, 5);
+    addLine(x + w, y + rad, x + w, y + h - rad, 8);
+    addArc(x + w - rad, y + h - rad, rad, 0.0f, 90.0f, 5);
+    addLine(x + w - rad, y + h, x + rad, y + h, 8);
+    addArc(x + rad, y + h - rad, rad, 90.0f, 180.0f, 5);
+    addLine(x, y + h - rad, x, y + rad, 8);
+    addArc(x + rad, y + rad, rad, 180.0f, 270.0f, 5);
+    if (pts.size() < 8) return;
+
+    const double n = (double)pts.size();
+    auto pointAt = [&](double index) -> const Point& {
+        double v = std::fmod(index, n);
+        if (v < 0) v += n;
+        return pts[(size_t)v];
+    };
+    double phase = std::fmod((double)(GetTickCount64() / 12), n);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int trail = 0; trail < 2; ++trail) {
+            double start = phase + (double)trail * n / 2.0;
+            for (int i = 0; i < 13; ++i) {
+                const Point& a = pointAt(start - i);
+                const Point& b = pointAt(start - i - 1.0);
+                float fade = 1.0f - (float)i / 14.0f;
+                float alpha = (pass == 0 ? 0.18f : 0.95f) * fade;
+                float width = pass == 0 ? 5.0f : 2.0f;
+                p.Line(a.x, a.y, b.x, b.y,
+                    D2D1::ColorF(color.r, color.g, color.b, alpha), width);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Small hand-drawn vector icons. Rounded caps and joins keep the set soft.
 // ---------------------------------------------------------------------------
@@ -1216,7 +1273,7 @@ static void DrawIcon(Painter& p, IconKind kind, R box, D2D1_COLOR_F color) {
 
 static void DrawButton(Painter& p, R r, const std::wstring& text, Act action, int index,
     bool primary, bool danger, bool disabled = false, bool iconOnly = false, bool spinner = false,
-    IconKind icon = IconKind::None) {
+    IconKind icon = IconKind::None, bool running = false) {
     bool hot = r.has(g->mouseX, g->mouseY) && !disabled;
     D2D1_COLOR_F bg = g->colors.transparent;
     D2D1_COLOR_F fg = g->colors.sub;
@@ -1235,6 +1292,7 @@ static void DrawButton(Painter& p, R r, const std::wstring& text, Act action, in
             : g->colors.border;
         p.StrokeRound(r, 7, edge, 1);
     }
+    if (running && !disabled) DrawRunningBorder(p, r, g->colors.accent);
     if (spinner) {
         DrawSpinner(p, r, fg);
     } else if (iconOnly) {
@@ -1484,15 +1542,16 @@ static void PaintMain(Painter& p) {
         IconKind primaryIcon = notInstalled ? IconKind::Warning : busy ? IconKind::Restart :
             (IsActive(s.status) ? IconKind::Stop : IconKind::Play);
         DrawButton(p, primary, L"", Act::CardPrimary, (int)i, true, IsActive(s.status),
-            busy, true, busy, primaryIcon);
-        DrawButton(p, restart, L"", Act::CardRestart, (int)i, false, false, notInstalled, true, false, IconKind::Restart);
+            busy, true, busy, primaryIcon, busy && !notInstalled);
+        DrawButton(p, restart, L"", Act::CardRestart, (int)i, false, false, notInstalled, true, false, IconKind::Restart, busy);
         DrawButton(p, log, L"", Act::CardLog, (int)i, false, false, !hasLog, true, false, IconKind::Document);
         bool hasBuildDebug = !s.project.buildCommandDebug.empty();
         bool hasBuildRelease = !s.project.buildCommandRelease.empty();
+        bool building = g_building.count(s.project.id) > 0;
         DrawButton(p, debugBuild, L"", Act::CardBuild, (int)i, false, false,
-            !hasBuildDebug, true, false, IconKind::Build);
+            !hasBuildDebug, true, false, IconKind::Build, building);
         DrawButton(p, release, L"", Act::CardBuildRelease, (int)i, false, false,
-            !hasBuildRelease, true, false, IconKind::Release);
+            !hasBuildRelease, true, false, IconKind::Release, building);
         DrawButton(p, more, L"", Act::CardMore, (int)i, false, false, false, true, false, IconKind::More);
 
         if (hover) {
@@ -1988,7 +2047,8 @@ static bool LooksLikeGeneratedBuildCommand(const std::wstring& command) {
         lower.find(L"dotnet publish") != std::wstring::npos ||
         lower.find(L"/t:build") != std::wstring::npos ||
         lower.find(L"/t:rebuild") != std::wstring::npos ||
-        lower.find(L"/t:publish") != std::wstring::npos;
+        lower.find(L"/t:publish") != std::wstring::npos ||
+        lower.find(L"/t:webpublish") != std::wstring::npos;
 }
 
 static void StartBuild(const Snapshot& snapshot, bool release) {
@@ -2016,6 +2076,7 @@ static void StartBuild(const Snapshot& snapshot, bool release) {
         return;
     }
     g_building.insert(snapshot.project.id);
+    InvalidateMain();
 
     std::wstring wd = snapshot.project.workingDirectory.empty() ? snapshot.project.rootPath : snapshot.project.workingDirectory;
     std::wstring log = g->engine.LogFileFor(snapshot.project.id);
@@ -2064,10 +2125,11 @@ static void FinishBuild(BuildJobResult* result) {
             std::wstring resolved = BuildOutputDir(built.project, result->release);
             if (!resolved.empty()) outputDir = resolved;
         }
-        if (result->release) OpenFolderPath(outputDir);
-        ShowInfoDialog(g->main, L"编译完成",
-            L"「" + result->name + L"」" + (result->release ? L" Release" : L" Debug") +
-            L" 编译成功。\n\n输出目录：\n" + outputDir);
+        std::wstring message = L"「" + result->name + L"」" + (result->release ? L" Release" : L" Debug") +
+            L" 编译成功。\n\n输出目录：\n" + outputDir;
+        std::wstring openLabel = result->release ? L"打开 Release 目录" : L"打开输出目录";
+        if (ShowConfirmDialog(g->main, L"编译完成", message, openLabel, L"关闭", false, false))
+            OpenFolderPath(outputDir);
     } else {
         std::wstring msg = L"「" + result->name + L"」编译失败。\n\n是否打开编译日志？";
         if (ShowConfirmDialog(g->main, L"编译失败", msg, L"打开日志", L"关闭", true))
@@ -2241,13 +2303,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             UpdateTrayIcon();
             if (IsWindowVisible(hwnd)) InvalidateRect(hwnd, nullptr, FALSE);
         } else if (wp == TIMER_SPIN) {
-            auto snaps = g->engine.Snapshots();
-            for (auto& s : snaps) {
-                if (s.status == Status::Starting || s.status == Status::Stopping) {
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    break;
+            bool animate = !g_building.empty();
+            if (!animate) {
+                auto snaps = g->engine.Snapshots();
+                for (auto& s : snaps) {
+                    if (s.status == Status::Starting || s.status == Status::Stopping) {
+                        animate = true;
+                        break;
+                    }
                 }
             }
+            if (animate) InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     case WM_MEASUREITEM: {
